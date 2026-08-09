@@ -65,11 +65,17 @@ def send_telegram(token, chat_id, text):
 
 @st.cache_data(ttl=60)
 def fetch(ticker):
-    tk = yf.Ticker(ticker)
-    hist = tk.history(period="20d", interval="1d")
-    intraday = tk.history(period="1d", interval="1m")
-    if hist.empty or intraday.empty:
-        return None
+    try:
+        tk = yf.Ticker(ticker)
+        hist = tk.history(period="20d", interval="1d")
+        intraday = tk.history(period="1d", interval="1m")
+    except Exception as e:
+        return {"Ticker": ticker, "_error": f"fetch failed: {e}"}
+
+    if hist.empty:
+        return {"Ticker": ticker, "_error": "no daily history (bad ticker or Yahoo blocked the request)"}
+    if intraday.empty:
+        return {"Ticker": ticker, "_error": "no intraday 1m data (market closed, or too far outside trading hours)"}
 
     avg_vol_20d = hist["Volume"][:-1].mean()
     today_vol = intraday["Volume"].sum()
@@ -116,8 +122,15 @@ def fetch(ticker):
     }
 
 
-rows = [r for r in (fetch(t) for t in tickers) if r is not None]
-df = pd.DataFrame(rows)
+rows = [fetch(t) for t in tickers]
+errors = [r for r in rows if r and "_error" in r]
+good_rows = [r for r in rows if r and "_error" not in r]
+df = pd.DataFrame(good_rows)
+
+if errors:
+    with st.expander(f"⚠️ {len(errors)} ticker(s) returned no data — click for details", expanded=True):
+        for e in errors:
+            st.write(f"**{e['Ticker']}**: {e['_error']}")
 
 if not df.empty:
     df = df[(df["RVOL"] >= min_rvol) & (df["Price"] <= max_price)]
