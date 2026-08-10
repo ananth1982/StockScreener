@@ -22,12 +22,24 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
+import os
 
 st.set_page_config(page_title="Ticker Watch", layout="wide")
 # requirements.txt needs: streamlit, yfinance, pandas, numpy, requests
 
-# --- Watchlist: edit this to whatever tickers you screen ---
-DEFAULT_TICKERS = ["APLD", "SOFI", "ON", "NVTS", "ADTX", "INTC", "GDC"]
+# --- Watchlist ---
+# Preferred: set in Streamlit Cloud under Settings -> Secrets:
+#     DEFAULT_TICKERS = "RXT, EVTL, HUT, HOOD, MRVL, AMD, HIMS, ACHV, LYFT, APLD, RGTI, KEY, ASTS, WRBY, AMPX, MP, APH, UBER, BBAI, NVDA"
+# Also works as a local env var (e.g. in a .env file or shell export) of the same name.
+# Falls back to the hardcoded list below if neither is set.
+_FALLBACK_TICKERS = ["RXT", "EVTL", "HUT", "HOOD", "MRVL", "AMD", "HIMS", "ACHV",
+                      "LYFT", "APLD", "RGTI", "KEY", "ASTS", "WRBY", "AMPX",
+                      "MP", "APH", "UBER", "BBAI", "NVDA"]
+_tickers_raw = st.secrets.get("DEFAULT_TICKERS") or os.environ.get("DEFAULT_TICKERS")
+DEFAULT_TICKERS = (
+    [t.strip().upper() for t in _tickers_raw.split(",") if t.strip()]
+    if _tickers_raw else _FALLBACK_TICKERS
+)
 
 st.title("Intraday Momentum Screener")
 
@@ -35,10 +47,10 @@ with st.sidebar:
     st.header("Filters")
     tickers_input = st.text_area("Tickers (comma-separated)", ", ".join(DEFAULT_TICKERS))
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-    min_rvol = st.number_input("Min RVOL", value=1.5, step=0.1)
-    max_price = st.number_input("Max price ($)", value=50.0, step=1.0)
+    min_rvol = st.number_input("Min RVOL", value=0.5, step=0.1)
+    max_price = st.number_input("Max price ($)", value=100.0, step=1.0)
     max_float_m = st.number_input("Max float (millions, 0 = no cap)", value=0.0, step=10.0)
-    alert_rvol = st.number_input("Alert RVOL threshold", value=3.0, step=0.5)
+    alert_rvol = st.number_input("Alert RVOL threshold", value=1.0, step=0.5)
     rising_only = st.checkbox("Only show volume rising every 30min", value=False)
     refresh = st.button("Refresh data")
 
@@ -46,6 +58,15 @@ with st.sidebar:
     st.header("Telegram alerts")
     bot_token = st.text_input("Bot token", value=st.secrets.get("TELEGRAM_BOT_TOKEN", ""), type="password")
     chat_id = st.text_input("Chat ID", value=st.secrets.get("TELEGRAM_CHAT_ID", ""))
+
+    st.divider()
+    st.header("WhatsApp alerts (Twilio sandbox)")
+    st.caption("Join your Twilio sandbox first by messaging the join code to the sandbox number from WhatsApp.")
+    twilio_sid = st.text_input("Twilio Account SID", value=st.secrets.get("TWILIO_ACCOUNT_SID", ""))
+    twilio_auth = st.text_input("Twilio Auth Token", value=st.secrets.get("TWILIO_AUTH_TOKEN", ""), type="password")
+    twilio_from = st.text_input("Twilio WhatsApp number", value=st.secrets.get("TWILIO_FROM", "whatsapp:+14155238886"))
+    twilio_to = st.text_input("Your WhatsApp number", value=st.secrets.get("TWILIO_TO", ""), placeholder="whatsapp:+919876543210")
+
     alerts_on = st.checkbox("Send alerts on this refresh", value=False)
 
 
@@ -56,6 +77,21 @@ def send_telegram(token, chat_id, text):
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        return r.ok, r.text
+    except Exception as e:
+        return False, str(e)
+
+
+def send_whatsapp(account_sid, auth_token, from_number, to_number, text):
+    if not account_sid or not auth_token or not to_number:
+        return False, "Missing Twilio SID, auth token, or destination number"
+    try:
+        r = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+            auth=(account_sid, auth_token),
+            data={"From": from_number, "To": to_number, "Body": text},
             timeout=10,
         )
         return r.ok, r.text
@@ -159,8 +195,18 @@ if alerts_on and (not alerts.empty or not rising.empty):
         lines.append(f"RVOL {alert_rvol}x+: " + ", ".join(alerts["Ticker"]))
     if not rising.empty:
         lines.append("Vol rising every 30min: " + ", ".join(rising["Ticker"]))
-    ok, info = send_telegram(bot_token, chat_id, "\n".join(lines))
-    if ok:
-        st.success("Telegram alert sent")
-    else:
-        st.error(f"Telegram send failed: {info}")
+    message = "\n".join(lines)
+
+    if bot_token and chat_id:
+        ok, info = send_telegram(bot_token, chat_id, message)
+        if ok:
+            st.success("Telegram alert sent")
+        else:
+            st.error(f"Telegram send failed: {info}")
+
+    if twilio_sid and twilio_auth and twilio_to:
+        ok, info = send_whatsapp(twilio_sid, twilio_auth, twilio_from, twilio_to, message)
+        if ok:
+            st.success("WhatsApp alert sent")
+        else:
+            st.error(f"WhatsApp send failed: {info}")
